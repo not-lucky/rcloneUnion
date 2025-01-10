@@ -1,5 +1,4 @@
 import argparse
-import hashlib
 import json
 import os
 import shutil
@@ -8,7 +7,6 @@ import time
 from datetime import datetime
 import multiprocessing
 
-
 # --- Configuration ---
 ACCOUNTS_FOLDER = "accounts"
 DATABASE_FILE = "drive_data.json"
@@ -16,29 +14,18 @@ DATABASE_BACKUP_FOLDER = "db_backups"
 
 # --- Helper Functions ---
 
-def calculate_md5(file_path):
-    """Calculates the MD5 hash of a file."""
-    hasher = hashlib.md5()
-    with open(file_path, 'rb') as file:
-        while True:
-            chunk = file.read(4096)
-            if not chunk:
-                break
-            hasher.update(chunk)
-    return hasher.hexdigest()
-
-def calculate_md5_for_file(file_path):
-    """Calculates MD5 for a single file (used by multiprocessing)."""
-    try:
-        md5_hash = calculate_md5(file_path)
-        return file_path, md5_hash
-    except Exception as e:
-        print(f"Error calculating MD5 for {file_path}: {e}")
-        return file_path, None
+def file_already_processed(db, file_path):
+    """Checks if a file has already been processed based on its name."""
+    for account_id, data in db["accounts"].items():
+        if file_path in data["files"]:
+            print(f"Skipping (already uploaded): {file_path}")
+            return True
+    return False
 
 def get_service_account_files():
     """Returns a list of service account JSON files in the accounts folder."""
     return [f for f in os.listdir(ACCOUNTS_FOLDER) if f.endswith('.json')]
+
 
 def create_database_backup():
     """Creates a backup of the database file."""
@@ -59,36 +46,40 @@ def load_database():
     except FileNotFoundError:
         return {"accounts": {}}
 
+
 def save_database(db):
     """Saves the database to the JSON file."""
     if not os.path.exists(DATABASE_FILE):
         # Create an empty database file if it doesn't exist
         with open(DATABASE_FILE, 'w') as f:
-            json.dump({"accounts": {}}, f)  
+            json.dump({"accounts": {}}, f)
 
     create_database_backup()
     with open(DATABASE_FILE, 'w') as f:
         json.dump(db, f, indent=4)
 
+
 def initialize_database(db):
     """Initializes the database with service account information."""
     sa_files = get_service_account_files()
     for sa_file in sa_files:
-        account_id = sa_file.replace(".json","")
+        account_id = sa_file.replace(".json", "")
         if account_id not in db["accounts"]:
             db["accounts"][account_id] = {
                 "used_space": 0,
-                "remaining_space": 15 * 1024**3,  # 15 GiB in bytes
+                "remaining_space": 15 * 1024 ** 3,  # 15 GiB in bytes
                 "files": {}
             }
     return db
 
-def update_account_usage(db, account_id, file_size, file_path, md5):
+
+def update_account_usage(db, account_id, file_size, file_path):
     """Updates the account usage in the database."""
     db["accounts"][account_id]["used_space"] += file_size
     db["accounts"][account_id]["remaining_space"] -= file_size
-    db["accounts"][account_id]["files"][file_path] = {"size": file_size, "md5": md5}
+    db["accounts"][account_id]["files"][file_path] = {"size": file_size}
     return db
+
 
 def find_suitable_account(db, file_size):
     """Finds a suitable service account for a file."""
@@ -99,8 +90,7 @@ def find_suitable_account(db, file_size):
 
     if not suitable_accounts:
         return None
-    
-    # Sort by used space ascending to maximize space utilization
+    # Sort by used space descending to maximize space utilization
     suitable_accounts.sort(key=lambda x: x[1], reverse=True)
     return suitable_accounts[0][0]
 
@@ -146,7 +136,6 @@ def generate_rclone_command(account_id, source_path, destination_path):
         "--drive-disable-http2",
         "--ignore-existing",  # Prevents re-uploading if the file exists with same size and modified time
         "--no-check-dest",
-        "--ignore-checksum",
         "--size-only",
         "--progress",
         source_path,
@@ -156,55 +145,37 @@ def generate_rclone_command(account_id, source_path, destination_path):
     # Create a string from the list for printing
     copy_command_str = " ".join(copy_command)
 
-    return create_remote_command_str, copy_command_str
+    return create_remote_command_str, copy_command
 
 
 # --- File and Directory Handling ---
 
 def scan_directory(db, source_dir, destination_base_path):
-    """Scans the directory, generates rclone commands, and calculates MD5 hashes in parallel."""
+    """Scans the directory, generates rclone commands, and checks if files were already processed."""
     rclone_commands = []
-    files_to_hash = []
 
     for root, _, files in os.walk(source_dir):
         for file in files:
             file_path = os.path.join(root, file)
             file_size = os.path.getsize(file_path)
-            files_to_hash.append(file_path)
 
-    # Use multiprocessing to calculate MD5 hashes in parallel
-    with multiprocessing.Pool() as pool:
-        results = pool.map(calculate_md5_for_file, files_to_hash)
+            # Determine relative path for destination
+            relative_path = os.path.relpath(file_path, source_dir)
+            destination_path = os.path.join(destination_base_path, relative_path)
 
-    for file_path, md5 in results:
-        if md5 is None:
-            continue  # Skip files that had errors during MD5 calculation
+            if not file_already_processed(db, destination_path):
+                account_id = find_suitable_account(db, file_size)
+                if account_id:
+                    create_remote_command, copy_command = generate_rclone_command(account_id, file_path,
+                                                                                destination_path)
 
-        
-        # Determine relative path for destination
-        relative_path = os.path.relpath(file_path, source_dir)
-        destination_path = os.path.join(destination_base_path, relative_path)
-
-        # Check if file already exists in database (any account)
-        file_exists = False
-        for account_id, data in db["accounts"].items():
-            if destination_path in data["files"] and data["files"][destination_path]["md5"] == md5:
-                print(f"Skipping (already uploaded): {file_path}")
-                file_exists = True
-                break
-
-        if not file_exists:
-            account_id = find_suitable_account(db, file_size)
-            if account_id:
-                create_remote_command, copy_command = generate_rclone_command(account_id, file_path, destination_path)
-
-                rclone_commands.append(create_remote_command)
-                rclone_commands.append(copy_command)
-                
-                db = update_account_usage(db, account_id, file_size, destination_path, md5)
-                print(f"Uploading (using {account_id}): {file_path} -> {destination_path}")
-            else:
-                print(f"Error: No suitable account found for {file_path} (size: {file_size} bytes)")
+                    rclone_commands.append(create_remote_command)
+                    rclone_commands.append(copy_command)
+                    db = update_account_usage(db, account_id, file_size, destination_path)
+                    print(
+                        f"Uploading (using {account_id}): {file_path} -> {destination_path}")
+                else:
+                    print(f"Error: No suitable account found for {file_path} (size: {file_size} bytes)")
 
     return rclone_commands, db
 
@@ -230,19 +201,21 @@ def print_drive_structure(db):
                     "size": file_data["size"]
                 }
         return tree
-    
+
     def _print_tree(tree, indent=""):
         """Recursively prints the tree structure."""
         for key, value in tree.items():
             if key == "(file)":
-                print(f"{indent}  - File (Size: {value['size']} bytes)") # Only print size
+                print(f"{indent} - File (Size: {value['size']} bytes)")  # Only print size
             else:
                 print(f"{indent}- {key}")
-                _print_tree(value, indent + "  ")
+                _print_tree(value, indent + " ")
 
     account_files = {account_id: data["files"] for account_id, data in db["accounts"].items()}
     tree = _build_tree(account_files)
     _print_tree(tree)
+
+
 # --- Main Program Logic ---
 
 def handle_upload(db, source, destination):
@@ -258,17 +231,8 @@ def handle_upload(db, source, destination):
 
     elif os.path.isfile(source):
         file_size = os.path.getsize(source)
-        md5 = calculate_md5(source)
 
-        # Check if file already exists in database (any account)
-        file_exists = False
-        for account_id, data in db["accounts"].items():
-            if destination in data["files"] and data["files"][destination]["md5"] == md5:
-                print(f"Skipping (already uploaded): {source}")
-                file_exists = True
-                break
-
-        if not file_exists:
+        if not file_already_processed(db, destination):
             account_id = find_suitable_account(db, file_size)
             if account_id:
                 create_remote_command, copy_command = generate_rclone_command(account_id, source, destination)
@@ -277,10 +241,13 @@ def handle_upload(db, source, destination):
                 print(create_remote_command)
                 print(copy_command)
 
-                db = update_account_usage(db, account_id, file_size, destination, md5)
+                db = update_account_usage(db, account_id, file_size, destination)
                 print(f"Uploading (using {account_id}): {source} -> {destination}")
             else:
                 print(f"Error: No suitable account found for {source} (size: {file_size} bytes)")
+        else:
+            print(f"Skipping already processed file: {source}")
+
     else:
         print(f"Error: Invalid source path: {source}")
 
@@ -295,7 +262,6 @@ def main():
     args = parser.parse_args()
 
     db = load_database()
-    # print(db)
     db = initialize_database(db)
 
 
