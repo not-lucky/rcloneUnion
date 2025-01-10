@@ -128,8 +128,6 @@ def generate_rclone_command(account_id, source_path, destination_path):
         "--drive-allow-import-name-change",
         "--drive-acknowledge-abuse",
         "--drive-keep-revision-forever",
-        "--drive-upload-cutoff", "5G",
-        "--drive-chunk-size", "256M",
         "--drive-batch-size", "1000",
         "--drive-batch-timeout", "1m",
         "--drive-use-trash=false",
@@ -138,8 +136,8 @@ def generate_rclone_command(account_id, source_path, destination_path):
         "--no-check-dest",
         "--size-only",
         "--progress",
-        source_path,
-        f"{remote_name}:{destination_path}"
+        f'"{source_path}"',
+        f'"{remote_name}:{destination_path}"' # Added double quotes to handle paths with special characters
     ]
 
     # Create a string from the list for printing
@@ -150,18 +148,28 @@ def generate_rclone_command(account_id, source_path, destination_path):
 
 # --- File and Directory Handling ---
 
-def scan_directory(db, source_dir, destination_base_path):
+def scan_directory(db, source_dir, destination_base_path, upload_folder):
     """Scans the directory, generates rclone commands, and checks if files were already processed."""
     rclone_commands = []
 
-    for root, _, files in os.walk(source_dir):
+    for root, dirs, files in os.walk(source_dir):
+        # Determine relative path for destination
+        relative_root = os.path.relpath(root, source_dir)
+        
+        if upload_folder:
+            current_destination_base_path = os.path.join(destination_base_path, os.path.basename(source_dir), relative_root) if relative_root != "." else os.path.join(destination_base_path, os.path.basename(source_dir))
+            # current_destination_base_path = os.path.join(destination_base_path, relative_root) 
+        else:
+            current_destination_base_path = destination_base_path
+
         for file in files:
             file_path = os.path.join(root, file)
             file_size = os.path.getsize(file_path)
 
-            # Determine relative path for destination
-            relative_path = os.path.relpath(file_path, source_dir)
-            destination_path = os.path.join(destination_base_path, relative_path)
+            # Construct destination path correctly for both cases
+            
+            destination_path = os.path.join(current_destination_base_path, file)
+          
 
             if not file_already_processed(db, destination_path):
                 account_id = find_suitable_account(db, file_size)
@@ -218,10 +226,10 @@ def print_drive_structure(db):
 
 # --- Main Program Logic ---
 
-def handle_upload(db, source, destination):
+def handle_upload(db, source, destination, upload_folder):
     """Handles the file/directory upload process."""
     if os.path.isdir(source):
-        rclone_commands, db = scan_directory(db, source, destination)
+        rclone_commands, db = scan_directory(db, source, destination, upload_folder)
         if rclone_commands:
             print("\nGenerated rclone commands:")
             for command in rclone_commands:
@@ -231,18 +239,24 @@ def handle_upload(db, source, destination):
 
     elif os.path.isfile(source):
         file_size = os.path.getsize(source)
+        
+        #Correct destination for single file when upload_folder is True
+        if upload_folder:
+          destination_path = os.path.join(destination, os.path.basename(source))
+        else:
+          destination_path = destination
 
-        if not file_already_processed(db, destination):
+        if not file_already_processed(db, destination_path):
             account_id = find_suitable_account(db, file_size)
             if account_id:
-                create_remote_command, copy_command = generate_rclone_command(account_id, source, destination)
+                create_remote_command, copy_command = generate_rclone_command(account_id, source, destination_path)
 
                 print("\nGenerated rclone commands:")
                 print(create_remote_command)
                 print(copy_command)
 
-                db = update_account_usage(db, account_id, file_size, destination)
-                print(f"Uploading (using {account_id}): {source} -> {destination}")
+                db = update_account_usage(db, account_id, file_size, destination_path)
+                print(f"Uploading (using {account_id}): {source} -> {destination_path}")
             else:
                 print(f"Error: No suitable account found for {source} (size: {file_size} bytes)")
         else:
@@ -259,19 +273,26 @@ def main():
     parser.add_argument("source", nargs='?', default=None, help="Path to the source directory or file to upload")
     parser.add_argument("destination", nargs='?', default=None, help="Destination path in Google Drive (e.g., 'my-uploads/')")
     parser.add_argument("-s", "--structure", action="store_true", help="Print the Google Drive structure")
+    parser.add_argument("--upload-folder", action="store_true", help="Upload the source folder directly to the destination")
+
     args = parser.parse_args()
 
     db = load_database()
     db = initialize_database(db)
 
 
+
     if args.structure:
         print_drive_structure(db)
     else:
+        # db = handle_upload(db, "test", "", True)
+        # save_database(db)
+        # exit()
+
+        
         if args.source is None or args.destination is None: # Use is None for comparison
             parser.error("Source and destination arguments are required for upload.")
-        # db = handle_upload(db, args.source, args.destination)
-        db = handle_upload(db, r"/home/lucky/stuff/rclone_union/test", "")
+        db = handle_upload(db, args.source, args.destination, args.upload_folder)
 
         save_database(db)
 
