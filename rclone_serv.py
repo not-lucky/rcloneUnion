@@ -184,41 +184,58 @@ def scan_directory(db, source_dir, destination_base_path, upload_folder):
     return rclone_commands, db
 
 # --- Drive Structure ---
+def print_drive_structure(db, path=None):
+    """Prints the Google Drive structure in a tree-like format, filtering by a given path.
 
-def print_drive_structure(db):
-    """
-    Prints the Google Drive structure in a tree-like format.
+    Args:
+        db (dict): The database containing the Google Drive structure.
+        path (str, optional): The path to filter the structure by. Defaults to None (entire structure).
     """
 
-    def _build_tree(account_files):
-        """Builds a tree structure from the file paths."""
+    def _build_tree(account_files, filter_path=None):
+        """Builds a tree structure from the file paths, optionally filtering by a given path."""
         tree = {}
         for account_id, files in account_files.items():
             for file_path, file_data in files.items():
-                parts = file_path.split(os.sep)
-                current_level = tree
-                for part in parts:
-                    if part not in current_level:
-                        current_level[part] = {}
-                    current_level = current_level[part]
-                current_level["(file)"] = {
-                    "size": file_data["size"]
-                }
+                if filter_path is None or file_path.startswith(filter_path):
+                    # Adjust file path to be relative to the filter path if a filter path is given
+                    relative_file_path = os.path.relpath(file_path, filter_path) if filter_path else file_path
+                    parts = relative_file_path.split(os.sep)
+                    current_level = tree
+                    for part in parts:
+                        if part not in current_level:
+                            current_level[part] = {}
+                        current_level = current_level[part]
+                    current_level["(file)"] = {
+                        "size": file_data["size"],
+                        "full_path": file_path  # Store the full path for printing or further processing
+                    }
         return tree
 
     def _print_tree(tree, indent=""):
         """Recursively prints the tree structure."""
         for key, value in tree.items():
             if key == "(file)":
-                print(f"{indent} - File (Size: {value['size']} bytes)")  # Only print size
+                pass
+                # print(f"{indent} - File: {value['full_path']} (Size: {value['size']} bytes)")
             else:
                 print(f"{indent}- {key}")
-                _print_tree(value, indent + " ")
+                _print_tree(value, indent + "  ")
 
     account_files = {account_id: data["files"] for account_id, data in db["accounts"].items()}
-    tree = _build_tree(account_files)
-    _print_tree(tree)
-
+    tree = _build_tree(account_files, path)
+    
+    if not tree:
+        if path:
+            print(f"No files found under the path '{path}'.")
+        else:
+            print("The Google Drive structure is empty.")
+    else:
+        if path:
+            print(f"Google Drive structure under '{path}':")
+        else:
+            print("Google Drive structure:")
+        _print_tree(tree)
 
 # --- Main Program Logic ---
 
@@ -263,12 +280,13 @@ def handle_upload(db, source, destination, upload_folder):
 
     return db
 
+
 def main():
     """Main function to handle CLI and program logic."""
     parser = argparse.ArgumentParser(description="Manage file uploads to Google Drive using multiple service accounts and rclone.", add_help=False)
     parser.add_argument("source", nargs='?', default=None, help="Path to the source directory or file to upload")
     parser.add_argument("destination", nargs='?', default=None, help="Destination path in Google Drive (e.g., 'my-uploads/')")
-    parser.add_argument("-s", "--structure", action="store_true", help="Print the Google Drive structure")
+    parser.add_argument("-s", "--structure", nargs='?', const=None, metavar="PATH", help="Print the Google Drive structure, optionally filtered by a path")
     parser.add_argument("--upload-folder", action="store_true", help="Upload the source folder directly to the destination")
     parser.add_argument("-h", "--help", action="help", default=argparse.SUPPRESS, help="Show this help message and exit")
 
@@ -281,17 +299,13 @@ def main():
     db = load_database()
     db = initialize_database(db)
 
-    if args.structure:
-        print_drive_structure(db)
+    if args.structure is not None:  # Check if -s was used (with or without a path)
+        print_drive_structure(db, args.structure)
+        return
+    elif args.source is None or args.destination is None:  # Check for upload arguments only if -s is not used
+        parser.error("Source and destination arguments are required for upload.")
     else:
-        # db = handle_upload(db, "/home/lucky/Downloads", "", True)
-        # save_database(db)
-        # exit()
-
-        if args.source is None or args.destination is None: # Use is None for comparison
-            parser.error("Source and destination arguments are required for upload.")
         db = handle_upload(db, args.source, args.destination, args.upload_folder)
-
         save_database(db)
 
 if __name__ == "__main__":
