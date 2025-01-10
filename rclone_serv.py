@@ -2,10 +2,7 @@ import argparse
 import json
 import os
 import shutil
-import subprocess
-import time
 from datetime import datetime
-import multiprocessing
 
 # --- Configuration ---
 ACCOUNTS_FOLDER = "accounts"
@@ -269,18 +266,21 @@ def handle_upload(db, source, destination, upload_folder):
 
 def main():
     """Main function to handle CLI and program logic."""
-    parser = argparse.ArgumentParser(description="Manage file uploads to Google Drive using multiple service accounts and rclone.")
+    parser = argparse.ArgumentParser(description="Manage file uploads to Google Drive using multiple service accounts and rclone.", add_help=False)
     parser.add_argument("source", nargs='?', default=None, help="Path to the source directory or file to upload")
     parser.add_argument("destination", nargs='?', default=None, help="Destination path in Google Drive (e.g., 'my-uploads/')")
     parser.add_argument("-s", "--structure", action="store_true", help="Print the Google Drive structure")
     parser.add_argument("--upload-folder", action="store_true", help="Upload the source folder directly to the destination")
+    parser.add_argument("-h", "--help", action="help", default=argparse.SUPPRESS, help="Show this help message and exit")
 
     args = parser.parse_args()
 
+    if not any(vars(args).values()):
+        parser.print_help()
+        exit()
+
     db = load_database()
     db = initialize_database(db)
-
-
 
     if args.structure:
         print_drive_structure(db)
@@ -289,7 +289,6 @@ def main():
         # save_database(db)
         # exit()
 
-        
         if args.source is None or args.destination is None: # Use is None for comparison
             parser.error("Source and destination arguments are required for upload.")
         db = handle_upload(db, args.source, args.destination, args.upload_folder)
