@@ -96,7 +96,7 @@ def find_suitable_account(db, file_size):
 def generate_rclone_command(account_id, source_path, destination_path):
     """Generates an rclone copy command."""
     config_file = os.path.join(ACCOUNTS_FOLDER, f"{account_id}.json")
-    remote_name = f"gdrive-{account_id}"  # Assuming you'll name remotes like this
+    remote_name = f"gdrive-{account_id}"
 
     # Create the rclone config command
     create_remote_command = [
@@ -154,18 +154,17 @@ def scan_directory(db, source_dir, destination_base_path, upload_folder):
         relative_root = os.path.relpath(root, source_dir)
         
         if upload_folder:
-            current_destination_base_path = os.path.join(destination_base_path, os.path.basename(source_dir), relative_root) if relative_root != "." else os.path.join(destination_base_path, os.path.basename(source_dir))
-            # current_destination_base_path = os.path.join(destination_base_path, relative_root) 
+            current_destination_path = os.path.join(destination_base_path, os.path.basename(source_dir), relative_root) if relative_root != "." else os.path.join(destination_base_path, os.path.basename(source_dir))
         else:
-            current_destination_base_path = destination_base_path
-
+            current_destination_path = os.path.join(destination_base_path, relative_root) if relative_root != "." else destination_base_path
+       
         for file in files:
             file_path = os.path.join(root, file)
             file_size = os.path.getsize(file_path)
 
             # Construct destination path correctly for both cases
             
-            destination_path = os.path.join(current_destination_base_path, file)
+            destination_path = os.path.join(current_destination_path, file)
           
 
             if not file_already_processed(db, destination_path):
@@ -275,9 +274,9 @@ def main():
 
     args = parser.parse_args()
 
-    if not any(vars(args).values()):
-        parser.print_help()
-        exit()
+    # if not any(vars(args).values()):
+    #     parser.print_help()
+    #     exit()
 
     db = load_database()
     db = initialize_database(db)
@@ -285,7 +284,7 @@ def main():
     if args.structure:
         print_drive_structure(db)
     else:
-        # db = handle_upload(db, "test", "", True)
+        # db = handle_upload(db, "/home/lucky/Downloads", "", True)
         # save_database(db)
         # exit()
 
