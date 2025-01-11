@@ -162,9 +162,12 @@ def scan_directory(db, source_dir, destination_base_path, upload_folder):
             file_path = os.path.join(root, file)
             file_size = os.path.getsize(file_path)
 
-            # Construct destination path correctly for both cases
+            # destination for rclone command, without filename
+            destination_path = current_destination_path
+
+            # destination with filename for database
+            destination_path_with_name = os.path.join(current_destination_path, file)
             
-            destination_path = os.path.join(current_destination_path, file)
           
 
             if not file_already_processed(db, destination_path):
@@ -175,9 +178,9 @@ def scan_directory(db, source_dir, destination_base_path, upload_folder):
 
                     rclone_commands.append(create_remote_command)
                     rclone_commands.append(copy_command)
-                    db = update_account_usage(db, account_id, file_size, destination_path)
+                    db = update_account_usage(db, account_id, file_size, destination_path_with_name)
                     print(
-                        f"Uploading (using {account_id}): {file_path} -> {destination_path}")
+                        f"Uploading (using {account_id}): {file_path} -> {destination_path_with_name}")
                 else:
                     print(f"Error: No suitable account found for {file_path} (size: {file_size} bytes)")
 
@@ -216,13 +219,13 @@ def print_drive_structure(db, path=None):
         """Recursively prints the tree structure."""
         for key, value in tree.items():
             if key == "(file)":
+                print(f"{indent} - File: {value['full_path']} (Size: {value['size']} bytes)")
                 pass
-                # print(f"{indent} - File: {value['full_path']} (Size: {value['size']} bytes)")
             else:
                 print(f"{indent}- {key}")
                 _print_tree(value, indent + "  ")
 
-    account_files = {account_id: data["files"] for account_id, data in db["accounts"].items()}
+    account_files = {account_id: data["files"] for account_id, data in db ["accounts"].items()}
     tree = _build_tree(account_files, path)
     
     if not tree:
@@ -253,11 +256,9 @@ def handle_upload(db, source, destination, upload_folder):
     elif os.path.isfile(source):
         file_size = os.path.getsize(source)
         
-        #Correct destination for single file when upload_folder is True
-        if upload_folder:
-          destination_path = os.path.join(destination, os.path.basename(source))
-        else:
-          destination_path = destination
+        # removed upload folder check since in uploading file case, it doesnt matter
+        destination_with_filename = f"{destination}/{source}" if destination else source
+        destination_path = destination
 
         if not file_already_processed(db, destination_path):
             account_id = find_suitable_account(db, file_size)
@@ -268,8 +269,8 @@ def handle_upload(db, source, destination, upload_folder):
                 print(create_remote_command)
                 print(copy_command)
 
-                db = update_account_usage(db, account_id, file_size, destination_path)
-                print(f"Uploading (using {account_id}): {source} -> {destination_path}")
+                db = update_account_usage(db, account_id, file_size, destination_with_filename)
+                print(f"Uploading (using {account_id}): {source} -> {destination_with_filename}")
             else:
                 print(f"Error: No suitable account found for {source} (size: {file_size} bytes)")
         else:
