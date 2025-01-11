@@ -3,11 +3,13 @@ import json
 import os
 import shutil
 from datetime import datetime
+import re
 
 # --- Configuration ---
 ACCOUNTS_FOLDER = "accounts"
 DATABASE_FILE = "drive_data.json"
 DATABASE_BACKUP_FOLDER = "db_backups"
+RCLONE_INCLUDE_FILES_DIR = "rclone_include_files" # Directory to store rclone include files
 
 # --- Helper Functions ---
 
@@ -91,10 +93,20 @@ def find_suitable_account(db, file_size):
     suitable_accounts.sort(key=lambda x: x[1], reverse=True)
     return suitable_accounts[0][0]
 
-# --- Rclone Command Generation ---
+# --- Rclone Command Generation & Include File Handling ---
 
-def generate_rclone_command(account_id, source_path, destination_path):
-    """Generates an rclone copy command."""
+def generate_rclone_command(account_id, include_file, destination_path, source_path):
+    """
+    Generates an rclone copy command using an include file.
+    
+    Args:
+        account_id (str): The ID of the service account.
+        include_file (str): Path to the include file containing file/folder names to copy.
+        destination_path (str): The destination path on Google Drive.
+
+    Returns:
+        tuple: A tuple containing the rclone config command and the rclone copy command.
+    """
     config_file = os.path.join(ACCOUNTS_FOLDER, f"{account_id}.json")
     remote_name = f"gdrive-{account_id}"
 
@@ -106,10 +118,6 @@ def generate_rclone_command(account_id, source_path, destination_path):
         "--drive-allow-import-name-change",
         "--drive-acknowledge-abuse",
         "--drive-keep-revision-forever",
-        "--drive-upload-cutoff", "5G",
-        "--drive-chunk-size", "256M",
-        "--drive-batch-size", "1000",
-        "--drive-batch-timeout", "1m",
         "--drive-use-trash=false",
         "--drive-disable-http2"
     ]
@@ -119,45 +127,75 @@ def generate_rclone_command(account_id, source_path, destination_path):
 
     copy_command = [
         "rclone", "copy",
-        "--config", "/dev/null",  # Use no config file, specify everything on command line
-        "--drive-service-account-file", config_file,
+        # "--config", "/dev/null",  # Use no config file, specify everything on command line
+        # "--drive-service-account-file", config_file,
         "--drive-scope", "drive",
         "--drive-allow-import-name-change",
         "--drive-acknowledge-abuse",
         "--drive-keep-revision-forever",
-        "--drive-batch-size", "1000",
-        "--drive-batch-timeout", "1m",
         "--drive-use-trash=false",
         "--drive-disable-http2",
         "--ignore-existing",  # Prevents re-uploading if the file exists with same size and modified time
         "--no-check-dest",
         "--size-only",
         "--progress",
-        f'"{source_path}"',
-        f'"{remote_name}:{destination_path}"' # Added double quotes to handle paths with special characters
+        "--include-from", include_file, # Use include file to specify what to copy
+        f'"{source_path}"', # Source is current directory, as include file contains paths
+        f'"{remote_name}:{destination_path}"'  # Added double quotes to handle paths with special characters
     ]
 
     # Create a string from the list for printing
     copy_command_str = " ".join(copy_command)
 
-    return create_remote_command_str, copy_command
+    return create_remote_command_str, copy_command_str
 
+def create_rclone_include_file(account_id, file_paths, destination_paths):
+    """
+    Creates an include file for rclone with the given file paths.
+
+    Args:
+        account_id (str): The ID of the service account, used to name the include file.
+        file_paths (list): A list of file paths to include.
+        destination_paths (list): A list of corresponding destination paths.
+
+    Returns:
+        str: The path to the created include file.
+    """
+
+    if not os.path.exists(RCLONE_INCLUDE_FILES_DIR):
+        os.makedirs(RCLONE_INCLUDE_FILES_DIR)
+
+    include_file_name = f"include_{account_id}.txt"
+    include_file_path = os.path.join(RCLONE_INCLUDE_FILES_DIR, include_file_name)
+
+    with open(include_file_path, "w") as f:
+        for file_path, destination_path in zip(file_paths, destination_paths):
+            # Write relative paths to the include file, rclone will copy based on these
+            f.write(f"{re.escape(file_path)}\n") 
+
+    return include_file_path
 
 # --- File and Directory Handling ---
 
 def scan_directory(db, source_dir, destination_base_path, upload_folder):
-    """Scans the directory, generates rclone commands, and checks if files were already processed."""
+    """
+    Scans the directory, generates rclone commands using include files, and checks if files were already processed.
+    """
     rclone_commands = []
+    account_files = {}  # Dictionary to store file paths for each account
 
     for root, dirs, files in os.walk(source_dir):
         # Determine relative path for destination
         relative_root = os.path.relpath(root, source_dir)
-        
+
         if upload_folder:
-            current_destination_path = os.path.join(destination_base_path, os.path.basename(source_dir), relative_root) if relative_root != "." else os.path.join(destination_base_path, os.path.basename(source_dir))
+            current_destination_path = os.path.join(destination_base_path, os.path.basename(source_dir),
+                                                    relative_root) if relative_root != "." else os.path.join(
+                destination_base_path, os.path.basename(source_dir))
         else:
-            current_destination_path = os.path.join(destination_base_path, relative_root) if relative_root != "." else destination_base_path
-       
+            current_destination_path = os.path.join(destination_base_path,
+                                                    relative_root) if relative_root != "." else destination_base_path
+
         for file in files:
             file_path = os.path.join(root, file)
             file_size = os.path.getsize(file_path)
@@ -167,22 +205,31 @@ def scan_directory(db, source_dir, destination_base_path, upload_folder):
 
             # destination with filename for database
             destination_path_with_name = os.path.join(current_destination_path, file)
-            
-          
 
-            if not file_already_processed(db, destination_path):
+            # relative path for include file
+            relative_file_path = os.path.relpath(file_path, source_dir)
+
+            if not file_already_processed(db, destination_path_with_name):
                 account_id = find_suitable_account(db, file_size)
                 if account_id:
-                    create_remote_command, copy_command = generate_rclone_command(account_id, file_path,
-                                                                                destination_path)
+                    # Add file to the account's list
+                    if account_id not in account_files:
+                        account_files[account_id] = {"file_paths": [], "destination_paths": []}
+                    account_files[account_id]["file_paths"].append(relative_file_path)
+                    account_files[account_id]["destination_paths"].append(destination_path)
 
-                    rclone_commands.append(create_remote_command)
-                    rclone_commands.append(copy_command)
                     db = update_account_usage(db, account_id, file_size, destination_path_with_name)
                     print(
-                        f"Uploading (using {account_id}): {file_path} -> {destination_path_with_name}")
+                        f"Preparing to upload (using {account_id}): {file_path} -> {destination_path_with_name}")
                 else:
                     print(f"Error: No suitable account found for {file_path} (size: {file_size} bytes)")
+
+    # Create rclone commands for each account
+    for account_id, data in account_files.items():
+        include_file = create_rclone_include_file(account_id, data["file_paths"], data["destination_paths"])
+        create_remote_command, copy_command = generate_rclone_command(account_id, include_file, destination_base_path, source_dir) # Pass base destination path
+        rclone_commands.append(create_remote_command)
+        rclone_commands.append(copy_command)
 
     return rclone_commands, db
 
@@ -225,9 +272,9 @@ def print_drive_structure(db, path=None):
                 print(f"{indent}- {key}")
                 _print_tree(value, indent + "  ")
 
-    account_files = {account_id: data["files"] for account_id, data in db ["accounts"].items()}
+    account_files = {account_id: data["files"] for account_id, data in db["accounts"].items()}
     tree = _build_tree(account_files, path)
-    
+
     if not tree:
         if path:
             print(f"No files found under the path '{path}'.")
@@ -255,15 +302,17 @@ def handle_upload(db, source, destination, upload_folder):
 
     elif os.path.isfile(source):
         file_size = os.path.getsize(source)
-        
+
         # removed upload folder check since in uploading file case, it doesnt matter
         destination_with_filename = f"{destination}/{source}" if destination else source
         destination_path = destination
 
-        if not file_already_processed(db, destination_path):
+        if not file_already_processed(db, destination_with_filename):
             account_id = find_suitable_account(db, file_size)
             if account_id:
-                create_remote_command, copy_command = generate_rclone_command(account_id, source, destination_path)
+                # Create an include file for the single file
+                include_file = create_rclone_include_file(account_id, [os.path.basename(source)], [destination_path]) # Add base destination path for single file
+                create_remote_command, copy_command = generate_rclone_command(account_id, include_file, destination_path)
 
                 print("\nGenerated rclone commands:")
                 print(create_remote_command)
