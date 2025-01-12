@@ -13,6 +13,8 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
 import os.path
 
+import copy
+
 
 # --- Configuration ---
 
@@ -30,6 +32,7 @@ def run_rclone_ls(drive_id):
     command = [
         "rclone",
         "ls",
+        "--fast-list",
         f"{MASTER_REMOTE},root_folder_id={drive_id}:"
     ]
     result = subprocess.run(command, capture_output=True, text=True)
@@ -155,7 +158,7 @@ def scan_gdrive_directory(db, drive_id, destination_base_path, upload_folder):
 
     # Create rclone commands for each account
     for account_id, data in account_files.items():
-        include_file = create_rclone_include_file(account_id, data["file_paths"], data["destination_paths"])
+        include_file = create_rclone_include_file(account_id, data["file_paths"])
         create_remote_command, copy_command = generate_rclone_command(account_id, include_file, destination_path, f"{MASTER_REMOTE},root_folder_id={drive_id}:")
         rclone_commands.append(create_remote_command)
         rclone_commands.append(copy_command)
@@ -234,7 +237,7 @@ def initialize_database(db):
         if account_id not in db["accounts"]:
             db["accounts"][account_id] = {
                 "used_space": 0,
-                "remaining_space": 15 * 1024 ** 3,  # 15 GiB in bytes
+                "remaining_space": 50 * 1024 ** 3,  # 15 GiB in bytes
                 "files": {}
             }
     return db
@@ -317,14 +320,13 @@ def generate_rclone_command(account_id, include_file, destination_path, source_p
 
     return create_remote_command_str, copy_command_str
 
-def create_rclone_include_file(account_id, file_paths, destination_paths):
+def create_rclone_include_file(account_id, file_paths):
     """
     Creates an include file for rclone with the given file paths.
 
     Args:
         account_id (str): The ID of the service account, used to name the include file.
         file_paths (list): A list of file paths to include.
-        destination_paths (list): A list of corresponding destination paths.
 
     Returns:
         str: The path to the created include file.
@@ -337,7 +339,7 @@ def create_rclone_include_file(account_id, file_paths, destination_paths):
     include_file_path = os.path.join(RCLONE_INCLUDE_FILES_DIR, include_file_name)
 
     with open(include_file_path, "w") as f:
-        for file_path, destination_path in zip(file_paths, destination_paths):
+        for file_path in file_paths:
             # Write relative paths to the include file, rclone will copy based on these
             f.write(f"{re.escape(file_path)}\n")
 
@@ -394,7 +396,7 @@ def scan_directory(db, source_dir, destination_base_path, upload_folder):
 
     # Create rclone commands for each account
     for account_id, data in account_files.items():
-        include_file = create_rclone_include_file(account_id, data["file_paths"], data["destination_paths"])
+        include_file = create_rclone_include_file(account_id, data["file_paths"])
         create_remote_command, copy_command = generate_rclone_command(account_id, include_file, destination_base_path,
                                                                      source_dir)  # Pass base destination path
         rclone_commands.append(create_remote_command)
@@ -436,7 +438,7 @@ def print_drive_structure(db, path=None):
         """Recursively prints the tree structure."""
         for key, value in tree.items():
             if key == "(file)":
-                print(f"{indent} - File: {value['full_path']} (Size: {value['size']} bytes)")
+                # print(f"{indent} - File: {value['full_path']} (Size: {value['size']} bytes)")
                 pass
             else:
                 print(f"{indent}- {key}")
@@ -495,8 +497,7 @@ def handle_upload(db, source, destination, upload_folder):
             account_id = find_suitable_account(db, file_size)
             if account_id:
                 # Create an include file for the single file
-                include_file = create_rclone_include_file(account_id, [os.path.basename(source)],
-                                                         [destination_path])  # Add base destination path for single file
+                include_file = create_rclone_include_file(account_id, [os.path.basename(source)])  # Add base destination path for single file
                 create_remote_command, copy_command = generate_rclone_command(account_id, include_file,
                                                                              destination_path, source)
 
@@ -516,7 +517,65 @@ def handle_upload(db, source, destination, upload_folder):
 
     return db
 
+# --- Removal Handle ---
 
+def handle_remove(db, source):
+    """Handles the removal of files/folders from the remote and updates the database."""
+    # Check if source is a Google Drive ID or a local file/folder path
+    if source:
+
+        removalMap = find_account_and_path(db, source) 
+
+        # Update database to remove all files under this folder
+        db = remove_from_database(copy.deepcopy(db), removalMap)
+
+        if not removalMap:
+            print("Error: Nothing to remove.\nCheck if path is correct.")
+        else:
+
+            # Generate rclone command to delete the folder
+            rclone_delete_commands = []
+
+            for account_id, data in removalMap.items():
+                include_file = create_rclone_include_file(account_id, data.keys())
+                rclone_delete_commands.append(
+                    f"rclone delete --include-from {include_file} g{account_id}:"
+                )
+
+            print("\nGenerated rclone delete command:")
+            print("\n".join(rclone_delete_commands))
+    else:
+        print(f"Error: Invalid source for removal: {source}")
+    return db
+
+
+def find_account_and_path(db, path):
+    removalMap = {}
+
+    for account_id, data in db['accounts'].items():
+        for file_path, file_data in data["files"].items():
+            if file_path.startswith(path):
+                if account_id not in removalMap:
+                    removalMap[account_id] = {file_path: file_data['size']}
+                else:
+                    removalMap[account_id][file_path] = file_data['size']
+
+    return removalMap
+
+
+def remove_from_database(db, removalMap):
+    """Removes entries from the database corresponding to the deleted path."""
+    # Iterate through accounts and remove files/folders matching the path
+    for account_id, data in removalMap.items():
+        for file_path, file_size in data.items():
+            db["accounts"][account_id]["used_space"] -= file_size
+            db["accounts"][account_id]["remaining_space"] += file_size
+            del db["accounts"][account_id]["files"][file_path]
+            print(f"Removed from database: {file_path}")
+    return db
+
+
+# --- Main Program Logic ---
 
 def main():
     """Main function to handle CLI and program logic."""
@@ -529,6 +588,8 @@ def main():
                         help="Print the Google Drive structure, optionally filtered by a path")
     parser.add_argument("--upload-folder", action="store_true",
                         help="Upload the source folder directly to the destination")
+    parser.add_argument("-r", "--remove", nargs='?', const=None, metavar="SOURCE",
+                        help="Remove the specified file or folder from the remote")
     parser.add_argument("-h", "--help", action="help", default=argparse.SUPPRESS,
                         help="Show this help message and exit")
 
@@ -539,12 +600,15 @@ def main():
 
     if args.structure is not None:  # Check if -s was used (with or without a path)
         print_drive_structure(db, args.structure)
-        return
-    elif args.source is None or args.destination is None:  # Check for upload arguments only if -s is not used
-        parser.error("Source and destination arguments are required for upload.")
-    else:
+    elif args.remove is not None:  # Check if -r was used
+        db = handle_remove(db, args.remove)
+        save_database(db)
+    elif args.source is not None and args.destination is not None:  # Handle upload
         db = handle_upload(db, args.source, args.destination, args.upload_folder)
         save_database(db)
+    else:
+        parser.error("Please provide valid arguments. Use -h for help.")
 
 if __name__ == "__main__":
     main()
+
