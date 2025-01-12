@@ -6,29 +6,31 @@ from datetime import datetime
 import re
 import subprocess
 
+from google.oauth2.credentials import Credentials
+from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
+from google_auth_oauthlib.flow import InstalledAppFlow
+from google.auth.transport.requests import Request
+import os.path
+
+
 # --- Configuration ---
 
 ACCOUNTS_FOLDER = "accounts"
 DATABASE_FILE = "drive_data.json"
 DATABASE_BACKUP_FOLDER = "db_backups"
 RCLONE_INCLUDE_FILES_DIR = "rclone_include_files"  # Directory to store rclone include files
+MASTER_REMOTE = 'god'   # gdrive remote used to get files in a folder
 
 # --- Helper Functions ---
 
 def run_rclone_ls(drive_id):
-    return [ {'filename': 'VIDEO_TS/VTS_12_0.IFO', 'size': '30720'},
- {'filename': 'VIDEO_TS/VTS_12_0.VOB', 'size': '116736'},
- {'filename': 'VIDEO_TS/VTS_12_0.BUP', 'size': '30720'},
- {'filename': 'VIDEO_TS/VTS_08_0.IFO', 'size': '18432'},
- {'filename': 'VIDEO_TS/VTS_08_0.VOB', 'size': '116736'},
- {'filename': 'VIDEO_TS/VTS_08_0.BUP', 'size': '18432'}]
-
     """Runs rclone ls command and returns the JSON output."""
 
     command = [
         "rclone",
         "ls",
-        f"god,root_folder_id={drive_id}:"
+        f"{MASTER_REMOTE},root_folder_id={drive_id}:"
     ]
     result = subprocess.run(command, capture_output=True, text=True)
     if result.returncode != 0:
@@ -38,7 +40,8 @@ def run_rclone_ls(drive_id):
     files = []
     for line in result.stdout.split('\n'):
       if line:
-        size, filename = line.split()
+        temp = line.split()
+        size, filename = temp[0], " ".join(temp[1:]).strip()
         files.append({
           'filename': filename,
           'size': size
@@ -56,7 +59,50 @@ def parse_gdrive_source(source_string):
     return drive_id
 
 
-def scan_gdrive_directory(db, drive_id, destination_base_path, upload_folder, root_folder_id=None):
+def gdrive_get_folder_name(folder_id):
+    """Shows basic usage of the Drive v3 API.
+    Prints the names and ids of the first 10 files the user has access to.
+    """
+
+    SCOPES = ['https://www.googleapis.com/auth/drive.metadata.readonly']
+
+    creds = None
+    # The file token.json stores the user's access and refresh tokens, and is
+    # created automatically when the authorization flow completes for the first
+    # time.
+    if os.path.exists('token.json'):
+        creds = Credentials.from_authorized_user_file('token.json', SCOPES)
+    # If there are no (valid) credentials available, let the user log in.
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        else:
+            flow = InstalledAppFlow.from_client_secrets_file(
+                'credentials.json', SCOPES)
+            creds = flow.run_local_server(port=0)
+        # Save the credentials for the next run
+        with open('token.json', 'w') as token:
+            token.write(creds.to_json())
+
+    try:
+        service = build('drive', 'v3', credentials=creds)
+
+        # Call the Drive v3 API
+        results = service.files().get(fileId=folder_id, fields='name').execute()
+        folder_name = results.get('name', [])
+
+        if not folder_name:
+            print('No folder found.')
+            return None
+        return folder_name
+
+    except HttpError as error:
+        # TODO Handle errors from drive API.
+        print(f'An error occurred: {error}')
+        return None
+
+
+def scan_gdrive_directory(db, drive_id, destination_base_path, upload_folder):
     """
     Scans a Google Drive directory, generates rclone commands, and checks for already processed files.
     """
@@ -68,18 +114,20 @@ def scan_gdrive_directory(db, drive_id, destination_base_path, upload_folder, ro
     if ls_output is None:
         return rclone_commands, db
 
+    if upload_folder:
+        drive_folder_name = gdrive_get_folder_name(drive_id)
+
     for item in ls_output:
         file_path = item["filename"]
         file_size = int(item["size"])
         
         # Construct destination path based on settings
         if upload_folder:
-            print("NEED SOME WORK TO DO.\n A WAY TO GET FOLDERNAME OF PROVIDED DRIVE ID.")
-            return rclone_commands, db
-
+            if drive_folder_name is None:
+                return rclone_commands, db
             
             # destination for rclone command, without filename
-            destination_path = os.path.join(destination_base_path, drive_id)
+            destination_path = os.path.join(destination_base_path, drive_folder_name)
             
             # destination with filename for database
             destination_path_with_name = os.path.join(destination_path, file_path)
@@ -108,7 +156,7 @@ def scan_gdrive_directory(db, drive_id, destination_base_path, upload_folder, ro
     # Create rclone commands for each account
     for account_id, data in account_files.items():
         include_file = create_rclone_include_file(account_id, data["file_paths"], data["destination_paths"])
-        create_remote_command, copy_command = generate_rclone_command(account_id, include_file, destination_base_path, f"god,root_folder_id={drive_id}:")
+        create_remote_command, copy_command = generate_rclone_command(account_id, include_file, destination_path, f"{MASTER_REMOTE},root_folder_id={drive_id}:")
         rclone_commands.append(create_remote_command)
         rclone_commands.append(copy_command)
 
@@ -159,7 +207,8 @@ def save_database(db):
     with open(DATABASE_FILE, 'w') as f:
         json.dump(db, f, indent=4)
 
-# # if using previously used service accounts
+
+# # if using previously used service accounts, NEED WORK
 # def initialize_database(db):
 #     """Initializes the database with service account information."""
 #     sa_files = get_service_account_files()
@@ -416,6 +465,7 @@ def handle_upload(db, source, destination, upload_folder):
         try:
             drive_id = parse_gdrive_source(source)
             rclone_commands, db = scan_gdrive_directory(db, drive_id, destination, upload_folder)
+            
             if rclone_commands:
                 print("\nGenerated rclone commands:")
                 for command in rclone_commands:
@@ -490,11 +540,10 @@ def main():
     if args.structure is not None:  # Check if -s was used (with or without a path)
         print_drive_structure(db, args.structure)
         return
-    # elif args.source is None or args.destination is None:  # Check for upload arguments only if -s is not used
-    #     parser.error("Source and destination arguments are required for upload.")
+    elif args.source is None or args.destination is None:  # Check for upload arguments only if -s is not used
+        parser.error("Source and destination arguments are required for upload.")
     else:
-        db = handle_upload(db, "id=123", "", False)
-        # db = handle_upload(db, args.source, args.destination, args.upload_folder)
+        db = handle_upload(db, args.source, args.destination, args.upload_folder)
         save_database(db)
 
 if __name__ == "__main__":
