@@ -4,14 +4,116 @@ import os
 import shutil
 from datetime import datetime
 import re
+import subprocess
 
 # --- Configuration ---
+
 ACCOUNTS_FOLDER = "accounts"
 DATABASE_FILE = "drive_data.json"
 DATABASE_BACKUP_FOLDER = "db_backups"
-RCLONE_INCLUDE_FILES_DIR = "rclone_include_files" # Directory to store rclone include files
+RCLONE_INCLUDE_FILES_DIR = "rclone_include_files"  # Directory to store rclone include files
 
 # --- Helper Functions ---
+
+def run_rclone_ls(drive_id):
+    return [ {'filename': 'VIDEO_TS/VTS_12_0.IFO', 'size': '30720'},
+ {'filename': 'VIDEO_TS/VTS_12_0.VOB', 'size': '116736'},
+ {'filename': 'VIDEO_TS/VTS_12_0.BUP', 'size': '30720'},
+ {'filename': 'VIDEO_TS/VTS_08_0.IFO', 'size': '18432'},
+ {'filename': 'VIDEO_TS/VTS_08_0.VOB', 'size': '116736'},
+ {'filename': 'VIDEO_TS/VTS_08_0.BUP', 'size': '18432'}]
+
+    """Runs rclone ls command and returns the JSON output."""
+
+    command = [
+        "rclone",
+        "ls",
+        f"god,root_folder_id={drive_id}:"
+    ]
+    result = subprocess.run(command, capture_output=True, text=True)
+    if result.returncode != 0:
+        print(f"Error running rclone ls: \n{result.stderr}")
+        return None
+
+    files = []
+    for line in result.stdout.split('\n'):
+      if line:
+        size, filename = line.split()
+        files.append({
+          'filename': filename,
+          'size': size
+        })
+
+    return files
+
+def parse_gdrive_source(source_string):
+    """Parses the Google Drive source string (e.g., "id=12345")."""
+    drive_id = source_string[3:]
+    
+    if not drive_id:
+        raise ValueError("Invalid Google Drive source format. Use 'id=...' or 'root_folder_id=...'")
+    
+    return drive_id
+
+
+def scan_gdrive_directory(db, drive_id, destination_base_path, upload_folder, root_folder_id=None):
+    """
+    Scans a Google Drive directory, generates rclone commands, and checks for already processed files.
+    """
+    rclone_commands = []
+    account_files = {}  # Dictionary to store file paths for each account
+
+    ls_output = run_rclone_ls(drive_id)
+
+    if ls_output is None:
+        return rclone_commands, db
+
+    for item in ls_output:
+        file_path = item["filename"]
+        file_size = int(item["size"])
+        
+        # Construct destination path based on settings
+        if upload_folder:
+            print("NEED SOME WORK TO DO.\n A WAY TO GET FOLDERNAME OF PROVIDED DRIVE ID.")
+            return rclone_commands, db
+
+            
+            # destination for rclone command, without filename
+            destination_path = os.path.join(destination_base_path, drive_id)
+            
+            # destination with filename for database
+            destination_path_with_name = os.path.join(destination_path, file_path)
+        
+        else:
+            # destination for rclone command, without filename
+            destination_path = destination_base_path
+            
+            # destination with filename for database
+            destination_path_with_name = os.path.join(destination_path, file_path)
+
+        if not file_already_processed(db, destination_path_with_name):
+            account_id = find_suitable_account(db, file_size)
+            if account_id:
+                # Add file to the account's list
+                if account_id not in account_files:
+                    account_files[account_id] = {"file_paths": [], "destination_paths": []}
+                account_files[account_id]["file_paths"].append(file_path)
+                account_files[account_id]["destination_paths"].append(destination_path)
+
+                db = update_account_usage(db, account_id, file_size, destination_path_with_name)
+                print(f"Preparing to upload (using {account_id}): {file_path} -> {destination_path_with_name}")
+            else:
+                print(f"Error: No suitable account found for {file_path} (size: {file_size} bytes)")
+
+    # Create rclone commands for each account
+    for account_id, data in account_files.items():
+        include_file = create_rclone_include_file(account_id, data["file_paths"], data["destination_paths"])
+        create_remote_command, copy_command = generate_rclone_command(account_id, include_file, destination_base_path, f"god,root_folder_id={drive_id}:")
+        rclone_commands.append(create_remote_command)
+        rclone_commands.append(copy_command)
+
+    return rclone_commands, db
+
 
 def file_already_processed(db, file_path):
     """Checks if a file has already been processed based on its name."""
@@ -57,6 +159,23 @@ def save_database(db):
     with open(DATABASE_FILE, 'w') as f:
         json.dump(db, f, indent=4)
 
+# # if using previously used service accounts
+# def initialize_database(db):
+#     """Initializes the database with service account information."""
+#     sa_files = get_service_account_files()
+#     for sa_file in sa_files:
+#         account_id = sa_file.replace(".json", "")
+#         if account_id not in db["accounts"]:
+#             used_space, remaining_space = get_gdrive_space(account_id)
+#             if used_space is None:
+#                 print(f"Skipping account {account_id} due to errors.")
+#                 continue
+#             db["accounts"][account_id] = {
+#                 "used_space": used_space,
+#                 "remaining_space": remaining_space,
+#                 "files": {}
+#             }
+#     return db
 
 def initialize_database(db):
     """Initializes the database with service account information."""
@@ -79,7 +198,6 @@ def update_account_usage(db, account_id, file_size, file_path):
     db["accounts"][account_id]["files"][file_path] = {"size": file_size}
     return db
 
-
 def find_suitable_account(db, file_size):
     """Finds a suitable service account for a file."""
     suitable_accounts = []
@@ -89,6 +207,7 @@ def find_suitable_account(db, file_size):
 
     if not suitable_accounts:
         return None
+
     # Sort by used space descending to maximize space utilization
     suitable_accounts.sort(key=lambda x: x[1], reverse=True)
     return suitable_accounts[0][0]
@@ -98,7 +217,7 @@ def find_suitable_account(db, file_size):
 def generate_rclone_command(account_id, include_file, destination_path, source_path):
     """
     Generates an rclone copy command using an include file.
-    
+
     Args:
         account_id (str): The ID of the service account.
         include_file (str): Path to the include file containing file/folder names to copy.
@@ -127,7 +246,7 @@ def generate_rclone_command(account_id, include_file, destination_path, source_p
 
     copy_command = [
         "rclone", "copy",
-        # "--config", "/dev/null",  # Use no config file, specify everything on command line
+        # "--config", "/dev/null", # Use no config file, specify everything on command line
         # "--drive-service-account-file", config_file,
         "--drive-scope", "drive",
         "--drive-allow-import-name-change",
@@ -139,8 +258,8 @@ def generate_rclone_command(account_id, include_file, destination_path, source_p
         "--no-check-dest",
         "--size-only",
         "--progress",
-        "--include-from", include_file, # Use include file to specify what to copy
-        f'"{source_path}"', # Source is current directory, as include file contains paths
+        "--include-from", include_file,  # Use include file to specify what to copy
+        f'"{source_path}"',  # Source is current directory, as include file contains paths
         f'"{remote_name}:{destination_path}"'  # Added double quotes to handle paths with special characters
     ]
 
@@ -171,7 +290,7 @@ def create_rclone_include_file(account_id, file_paths, destination_paths):
     with open(include_file_path, "w") as f:
         for file_path, destination_path in zip(file_paths, destination_paths):
             # Write relative paths to the include file, rclone will copy based on these
-            f.write(f"{re.escape(file_path)}\n") 
+            f.write(f"{re.escape(file_path)}\n")
 
     return include_file_path
 
@@ -227,13 +346,15 @@ def scan_directory(db, source_dir, destination_base_path, upload_folder):
     # Create rclone commands for each account
     for account_id, data in account_files.items():
         include_file = create_rclone_include_file(account_id, data["file_paths"], data["destination_paths"])
-        create_remote_command, copy_command = generate_rclone_command(account_id, include_file, destination_base_path, source_dir) # Pass base destination path
+        create_remote_command, copy_command = generate_rclone_command(account_id, include_file, destination_base_path,
+                                                                     source_dir)  # Pass base destination path
         rclone_commands.append(create_remote_command)
         rclone_commands.append(copy_command)
 
     return rclone_commands, db
 
 # --- Drive Structure ---
+
 def print_drive_structure(db, path=None):
     """Prints the Google Drive structure in a tree-like format, filtering by a given path.
 
@@ -270,7 +391,7 @@ def print_drive_structure(db, path=None):
                 pass
             else:
                 print(f"{indent}- {key}")
-                _print_tree(value, indent + "  ")
+                _print_tree(value, indent + " ")
 
     account_files = {account_id: data["files"] for account_id, data in db["accounts"].items()}
     tree = _build_tree(account_files, path)
@@ -291,7 +412,20 @@ def print_drive_structure(db, path=None):
 
 def handle_upload(db, source, destination, upload_folder):
     """Handles the file/directory upload process."""
-    if os.path.isdir(source):
+    if source.startswith("id="):
+        try:
+            drive_id = parse_gdrive_source(source)
+            rclone_commands, db = scan_gdrive_directory(db, drive_id, destination, upload_folder)
+            if rclone_commands:
+                print("\nGenerated rclone commands:")
+                for command in rclone_commands:
+                    print(command)
+            else:
+                print("No files to upload.")
+        except ValueError as e:
+            print(f"Error: {e}")
+
+    elif os.path.isdir(source):
         rclone_commands, db = scan_directory(db, source, destination, upload_folder)
         if rclone_commands:
             print("\nGenerated rclone commands:")
@@ -311,8 +445,10 @@ def handle_upload(db, source, destination, upload_folder):
             account_id = find_suitable_account(db, file_size)
             if account_id:
                 # Create an include file for the single file
-                include_file = create_rclone_include_file(account_id, [os.path.basename(source)], [destination_path]) # Add base destination path for single file
-                create_remote_command, copy_command = generate_rclone_command(account_id, include_file, destination_path)
+                include_file = create_rclone_include_file(account_id, [os.path.basename(source)],
+                                                         [destination_path])  # Add base destination path for single file
+                create_remote_command, copy_command = generate_rclone_command(account_id, include_file,
+                                                                             destination_path, source)
 
                 print("\nGenerated rclone commands:")
                 print(create_remote_command)
@@ -331,20 +467,22 @@ def handle_upload(db, source, destination, upload_folder):
     return db
 
 
+
 def main():
     """Main function to handle CLI and program logic."""
     parser = argparse.ArgumentParser(description="Manage file uploads to Google Drive using multiple service accounts and rclone.", add_help=False)
-    parser.add_argument("source", nargs='?', default=None, help="Path to the source directory or file to upload")
-    parser.add_argument("destination", nargs='?', default=None, help="Destination path in Google Drive (e.g., 'my-uploads/')")
-    parser.add_argument("-s", "--structure", nargs='?', const=None, metavar="PATH", help="Print the Google Drive structure, optionally filtered by a path")
-    parser.add_argument("--upload-folder", action="store_true", help="Upload the source folder directly to the destination")
-    parser.add_argument("-h", "--help", action="help", default=argparse.SUPPRESS, help="Show this help message and exit")
+    parser.add_argument("source", nargs='?', default=None,
+                        help="Path to the source directory or file to upload, or Google Drive ID (id=...)")
+    parser.add_argument("destination", nargs='?', default=None,
+                        help="Destination path in Google Drive (e.g., 'my-uploads/')")
+    parser.add_argument("-s", "--structure", nargs='?', const=None, metavar="PATH",
+                        help="Print the Google Drive structure, optionally filtered by a path")
+    parser.add_argument("--upload-folder", action="store_true",
+                        help="Upload the source folder directly to the destination")
+    parser.add_argument("-h", "--help", action="help", default=argparse.SUPPRESS,
+                        help="Show this help message and exit")
 
     args = parser.parse_args()
-
-    # if not any(vars(args).values()):
-    #     parser.print_help()
-    #     exit()
 
     db = load_database()
     db = initialize_database(db)
@@ -352,10 +490,11 @@ def main():
     if args.structure is not None:  # Check if -s was used (with or without a path)
         print_drive_structure(db, args.structure)
         return
-    elif args.source is None or args.destination is None:  # Check for upload arguments only if -s is not used
-        parser.error("Source and destination arguments are required for upload.")
+    # elif args.source is None or args.destination is None:  # Check for upload arguments only if -s is not used
+    #     parser.error("Source and destination arguments are required for upload.")
     else:
-        db = handle_upload(db, args.source, args.destination, args.upload_folder)
+        db = handle_upload(db, "id=123", "", False)
+        # db = handle_upload(db, args.source, args.destination, args.upload_folder)
         save_database(db)
 
 if __name__ == "__main__":
