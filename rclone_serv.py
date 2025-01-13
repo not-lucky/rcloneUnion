@@ -5,6 +5,7 @@ import shutil
 from datetime import datetime
 import re
 import subprocess
+import zipfile
 
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
@@ -25,6 +26,14 @@ RCLONE_INCLUDE_FILES_DIR = "rclone_include_files"  # Directory to store rclone i
 MASTER_REMOTE = 'god'   # gdrive remote used to get files in a folder
 
 # --- Helper Functions ---
+
+def clear_include_files_directory():
+    """Clears all contents inside the include files directory."""
+    if os.path.exists(RCLONE_INCLUDE_FILES_DIR):
+        shutil.rmtree(RCLONE_INCLUDE_FILES_DIR)
+    os.makedirs(RCLONE_INCLUDE_FILES_DIR)
+    print(f"Include files directory cleared: {RCLONE_INCLUDE_FILES_DIR}")
+
 
 def run_rclone_ls(drive_id):
     """Runs rclone ls command and returns the JSON output."""
@@ -105,17 +114,16 @@ def gdrive_get_folder_name(folder_id):
         return None
 
 
-def scan_gdrive_directory(db, drive_id, destination_base_path, upload_folder):
+def scan_gdrive_directory(db, drive_id, destination_base_path, upload_folder, rclone_commands):
     """
     Scans a Google Drive directory, generates rclone commands, and checks for already processed files.
     """
-    rclone_commands = []
     account_files = {}  # Dictionary to store file paths for each account
 
     ls_output = run_rclone_ls(drive_id)
 
     if ls_output is None:
-        return rclone_commands, db
+        return db
 
     if upload_folder:
         drive_folder_name = gdrive_get_folder_name(drive_id)
@@ -127,7 +135,7 @@ def scan_gdrive_directory(db, drive_id, destination_base_path, upload_folder):
         # Construct destination path based on settings
         if upload_folder:
             if drive_folder_name is None:
-                return rclone_commands, db
+                return db
             
             # destination for rclone command, without filename
             destination_path = os.path.join(destination_base_path, drive_folder_name)
@@ -163,7 +171,7 @@ def scan_gdrive_directory(db, drive_id, destination_base_path, upload_folder):
         rclone_commands.append(create_remote_command)
         rclone_commands.append(copy_command)
 
-    return rclone_commands, db
+    return db
 
 
 def file_already_processed(db, file_path):
@@ -179,12 +187,12 @@ def get_service_account_files():
     return [f for f in os.listdir(ACCOUNTS_FOLDER) if f.endswith('.json')]
 
 
-def create_database_backup():
+def create_database_backup(backup_dir, db_backup_folder=DATABASE_BACKUP_FOLDER):
     """Creates a backup of the database file."""
-    if not os.path.exists(DATABASE_BACKUP_FOLDER):
-        os.makedirs(DATABASE_BACKUP_FOLDER)
+    if not os.path.exists(db_backup_folder):
+        os.makedirs(db_backup_folder)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    backup_file = os.path.join(DATABASE_BACKUP_FOLDER, f"drive_data_backup_{timestamp}.json")
+    backup_file = os.path.join(db_backup_folder, f"drive_data_backup_{timestamp}.json")
     shutil.copy2(DATABASE_FILE, backup_file)
     print(f"Database backup created: {backup_file}")
 
@@ -206,28 +214,10 @@ def save_database(db):
         with open(DATABASE_FILE, 'w') as f:
             json.dump({"accounts": {}}, f)
 
-    create_database_backup()
+    create_database_backup(backup_dir=None)
     with open(DATABASE_FILE, 'w') as f:
         json.dump(db, f, indent=4)
 
-
-# # if using previously used service accounts, NEED WORK
-# def initialize_database(db):
-#     """Initializes the database with service account information."""
-#     sa_files = get_service_account_files()
-#     for sa_file in sa_files:
-#         account_id = sa_file.replace(".json", "")
-#         if account_id not in db["accounts"]:
-#             used_space, remaining_space = get_gdrive_space(account_id)
-#             if used_space is None:
-#                 print(f"Skipping account {account_id} due to errors.")
-#                 continue
-#             db["accounts"][account_id] = {
-#                 "used_space": used_space,
-#                 "remaining_space": remaining_space,
-#                 "files": {}
-#             }
-#     return db
 
 def initialize_database(db):
     """Initializes the database with service account information."""
@@ -237,7 +227,7 @@ def initialize_database(db):
         if account_id not in db["accounts"]:
             db["accounts"][account_id] = {
                 "used_space": 0,
-                "remaining_space": 50 * 1024 ** 3,  # 15 GiB in bytes
+                "remaining_space": int(14.95 * 1024 ** 3),  # Not doing 15 fully for now
                 "files": {}
             }
     return db
@@ -327,31 +317,25 @@ def create_rclone_include_file(account_id, file_paths):
     Args:
         account_id (str): The ID of the service account, used to name the include file.
         file_paths (list): A list of file paths to include.
+        include_files_dir (str): Directory to store the include file.
 
     Returns:
         str: The path to the created include file.
     """
-
-    if not os.path.exists(RCLONE_INCLUDE_FILES_DIR):
-        os.makedirs(RCLONE_INCLUDE_FILES_DIR)
-
+    os.makedirs(RCLONE_INCLUDE_FILES_DIR, exist_ok=True)
     include_file_name = f"include_{account_id}.txt"
-    include_file_path = os.path.join(RCLONE_INCLUDE_FILES_DIR, include_file_name)
-
-    with open(include_file_path, "w") as f:
+    include_file = os.path.join(RCLONE_INCLUDE_FILES_DIR, include_file_name)
+    with open(include_file, "w") as f:
         for file_path in file_paths:
-            # Write relative paths to the include file, rclone will copy based on these
             f.write(f"{re.escape(file_path)}\n")
-
-    return include_file_path
+    return include_file
 
 # --- File and Directory Handling ---
 
-def scan_directory(db, source_dir, destination_base_path, upload_folder):
+def scan_directory(db, source_dir, destination_base_path, upload_folder, rclone_commands):
     """
     Scans the directory, generates rclone commands using include files, and checks if files were already processed.
     """
-    rclone_commands = []
     account_files = {}  # Dictionary to store file paths for each account
 
     for root, dirs, files in os.walk(source_dir):
@@ -402,7 +386,7 @@ def scan_directory(db, source_dir, destination_base_path, upload_folder):
         rclone_commands.append(create_remote_command)
         rclone_commands.append(copy_command)
 
-    return rclone_commands, db
+    return db
 
 # --- Drive Structure ---
 
@@ -461,12 +445,12 @@ def print_drive_structure(db, path=None):
 
 # --- Main Program Logic ---
 
-def handle_upload(db, source, destination, upload_folder):
+def handle_upload(db, source, destination, upload_folder, rclone_commands):
     """Handles the file/directory upload process."""
     if source.startswith("id="):
         try:
             drive_id = parse_gdrive_source(source)
-            rclone_commands, db = scan_gdrive_directory(db, drive_id, destination, upload_folder)
+            db = scan_gdrive_directory(db, drive_id, destination, upload_folder, rclone_commands)
             
             if rclone_commands:
                 print("\nGenerated rclone commands:")
@@ -478,7 +462,7 @@ def handle_upload(db, source, destination, upload_folder):
             print(f"Error: {e}")
 
     elif os.path.isdir(source):
-        rclone_commands, db = scan_directory(db, source, destination, upload_folder)
+        db = scan_directory(db, source, destination, upload_folder, rclone_commands)
         if rclone_commands:
             print("\nGenerated rclone commands:")
             for command in rclone_commands:
@@ -489,7 +473,7 @@ def handle_upload(db, source, destination, upload_folder):
     elif os.path.isfile(source):
         file_size = os.path.getsize(source)
 
-        # removed upload folder check since in uploading file case, it doesnt matter
+        # removed upload folder check since in uploading file case, it doesn't matter
         destination_with_filename = f"{destination}/{source}" if destination else source
         destination_path = destination
 
@@ -519,7 +503,7 @@ def handle_upload(db, source, destination, upload_folder):
 
 # --- Removal Handle ---
 
-def handle_remove(db, source):
+def handle_remove(db, source, rclone_commands):
     """Handles the removal of files/folders from the remote and updates the database."""
     # Check if source is a Google Drive ID or a local file/folder path
     if source:
@@ -534,16 +518,14 @@ def handle_remove(db, source):
         else:
 
             # Generate rclone command to delete the folder
-            rclone_delete_commands = []
-
             for account_id, data in removalMap.items():
                 include_file = create_rclone_include_file(account_id, data.keys())
-                rclone_delete_commands.append(
+                rclone_commands.append(
                     f"rclone delete --include-from {include_file} g{account_id}:"
                 )
 
             print("\nGenerated rclone delete command:")
-            print("\n".join(rclone_delete_commands))
+            print("\n".join(rclone_commands))
     else:
         print(f"Error: Invalid source for removal: {source}")
     return db
@@ -574,6 +556,37 @@ def remove_from_database(db, removalMap):
             print(f"Removed from database: {file_path}")
     return db
 
+# --- Backup Utility ---
+
+def create_backup(backup_dir, args, rclone_commands, db_before, db_after):
+    """Creates a backup of inputs, commands, include files, and databases."""
+    if not os.path.exists(backup_dir):
+        os.makedirs(backup_dir)
+
+    # Backup input arguments
+    with open(os.path.join(backup_dir, "input_arguments.txt"), "w") as f:
+        f.write(str(args))
+
+    # Backup rclone commands
+    with open(os.path.join(backup_dir, "generated_commands.txt"), "w") as f:
+        for cmd in rclone_commands:
+            f.write(f"{cmd}\n")
+
+    # Backup include files
+    include_files_path = os.path.join(backup_dir, "include_files.zip")
+    with zipfile.ZipFile(include_files_path, 'w') as zipf:
+        for root, dirs, files in os.walk(RCLONE_INCLUDE_FILES_DIR):
+            for file in files:
+                file_path = os.path.join(root, file)
+                zipf.write(file_path, os.path.relpath(file_path, RCLONE_INCLUDE_FILES_DIR))
+
+    # Backup database before and after execution
+    with open(os.path.join(backup_dir, "database_before.json"), "w") as f:
+        json.dump(db_before, f, indent=4)
+    with open(os.path.join(backup_dir, "database_after.json"), "w") as f:
+        json.dump(db_after, f, indent=4)
+
+    print(f"Backup created in: {backup_dir}")
 
 # --- Main Program Logic ---
 
@@ -595,20 +608,35 @@ def main():
 
     args = parser.parse_args()
 
-    db = load_database()
-    db = initialize_database(db)
+    # Create backup directory
+    backup_dir = os.path.join("backups", datetime.now().strftime("%Y%m%d_%H%M%S"))
+    os.makedirs(backup_dir, exist_ok=True)
+
+    db_before = load_database()
+    db_before = initialize_database(db_before)
+    db = copy.deepcopy(db_before)
+    rclone_commands = []
+
+    clear_include_files_directory()
 
     if args.structure is not None:  # Check if -s was used (with or without a path)
         print_drive_structure(db, args.structure)
     elif args.remove is not None:  # Check if -r was used
-        db = handle_remove(db, args.remove)
+        db = handle_remove(db, args.remove, rclone_commands)
         save_database(db)
-    elif args.source is not None and args.destination is not None:  # Handle upload
-        db = handle_upload(db, args.source, args.destination, args.upload_folder)
+    elif args.source is not None and args.destination is not None:
+        db = handle_upload(db, args.source, args.destination, args.upload_folder, rclone_commands)
         save_database(db)
     else:
         parser.error("Please provide valid arguments. Use -h for help.")
 
+    db_after = load_database()
+
+    # Collect rclone_commands from the functions
+    # (Assuming rclone_commands are collected during handle_upload and handle_remove)
+
+    # Create backup
+    create_backup(backup_dir, args, rclone_commands, db_before, db_after)
+
 if __name__ == "__main__":
     main()
-
