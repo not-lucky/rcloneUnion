@@ -1,48 +1,117 @@
-# Easy Google Drive Uploader
+# rcloneUnion
 
-This script helps you upload files and folders to Google Drive. It's smart because it can use multiple Google accounts to store your files, so you don't run out of space as quickly. It output commands for a tool called `rclone` which is then used for uploading.
+This project is designed to manage file uploads and transfers to Google Drive using multiple service accounts and the rclone tool. It provides a structured way to handle large file transfers, manage account usage, and maintain a database of uploaded files.
 
-The idea for this 
+## Table of Contents
 
-## Features:
+- [Features](#features)
+- [Prerequisites](#prerequisites)
+- [Installation](#installation)
+- [Configuration](#configuration)
+- [Usage](#usage)
+  - [Uploading Files/Directories](#uploading-filesdirectories)
+  - [Removing Files/Directories](#removing-filesdirectories)
+  - [Printing Drive Structure](#printing-drive-structure)
+- [Backup Management](#backup-management)
+- [Dependencies](#dependencies)
+- [Troubleshooting](#troubleshooting)
+- [Contributing](#contributing)
+- [License](#license)
 
-*   **Uses Many Accounts:** It spreads your uploads across different Google accounts, so you get more than the usual 15 GB of free storage.
-*   **Picks the Best Account:** It automatically chooses the Google account with the most free space for each file.
-*   **Shows Your Drive:** You can use it to see a simple list of all your files and folders on Google Drive.
+## Features
 
+- Upload files or directories to Google Drive.
+- Manage multiple Google Drive service accounts.
+- Track file uploads and account usage in a database.
+- Generate rclone commands for file transfers.
+- Backup input arguments, commands, and database changes.
 
 ## Prerequisites
 
-1.  **Python 3.6 or higher:** Ensure you have Python 3 installed on your system.
-2.  **rclone:** Install `rclone` by following the instructions for your operating system on the official `rclone` website: [https://rclone.org/install/](https://rclone.org/install/)
-3.  **Google Cloud Service Accounts:**
-    *   Create a Google Cloud project.
-    *   Enable the Google Drive API for your project.
-    *   Create multiple service accounts (as many as you need) within your project.
-    *   For each service account, download the JSON key file and place it in the `accounts` directory.
-    *   You might need to share your Google drive folder with each of created service accounts.
+- Python 3.8 or higher.
+- Google Drive API credentials.
+- rclone installed and configured on your system.
 
 ## Installation
 
-1.  **Clone the Repository (or Download the Script):**
+1. **Clone the repository:**
 
-    ```bash
-    git clone https://github.com/not-lucky/rcloneUnion.git
-    cd rcloneUnion
-    ```
+   ```bash
+   git clone https://github.com/not-lucky/rcloneUnion.git
+   cd rcloneUnion
+   ```
 
-2.  **Create the `accounts` Folder:**
+2. **Install dependencies:**
 
-    ```bash
-    mkdir accounts
-    ```
+   ```bash
+   pip install -r requirements.txt
+   ```
 
-    Place your downloaded service account JSON key files inside this `accounts` folder.
+
+3. **Set up Google API credentials:**
+
+   - Download `credentials.json` from the Google Cloud Console and place it in the project directory.
+   - Ensure you have service account files in the `accounts` directory.
 
 
 ## Usage
 
-**Basic Syntax:**
+### Uploading Files/Directories
+
+To upload a file or directory to Google Drive:
 
 ```bash
-python rclone_serv.py <source> <destination> [options]
+python main.py /path/to/source /path/in/drive [--upload-folder]
+```
+
+- Replace `/path/to/source` with the path to your local file or directory.
+- Replace `/path/in/drive` with the destination path in Google Drive.
+- Use `--upload-folder` to upload the source folder directly to the destination.
+
+### Removing Files/Directories
+
+To remove a file or directory from Google Drive:
+
+```bash
+python main.py -r /path/in/drive
+```
+
+- Replace `/path/in/drive` with the path to the file or directory in Google Drive.
+
+### Printing Drive Structure
+
+To print the structure of your Google Drive:
+
+```bash
+python main.py -s [optional_path]
+```
+
+- Omit `optional_path` to print the entire structure.
+- Provide a path to filter the structure.
+
+## Backup Management
+
+- **Backups** are created automatically when changes are made.
+- Backups include input arguments, generated commands, include files, and database snapshots.
+- Backup files are stored in the `backups` directory with timestamps.
+
+## Dependencies
+
+- `google-auth`
+- `google-auth-oauthlib`
+- `google-api-python-client`
+- `rclone` (installed separately)
+
+## Troubleshooting
+
+- **Error: No module named ...**
+
+  Ensure all dependencies are installed.
+
+- **Error: rclone not found**
+
+  Make sure rclone is installed and added to your system's PATH.
+
+- **API Errors:**
+
+  Check your Google API credentials and permissions.

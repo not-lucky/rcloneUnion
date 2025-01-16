@@ -748,10 +748,6 @@ def main():
 
     db_after = load_database()
 
-    # Collect rclone_commands from the functions
-    # (Assuming rclone_commands are collected during handle_upload and handle_remove)
-
-    # Create backup
     create_backup(backup_dir, args, rclone_commands, db_before, db_after)
 
 

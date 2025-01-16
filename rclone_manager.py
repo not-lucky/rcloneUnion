@@ -47,7 +47,7 @@ class RcloneManager:
                 "--no-check-dest",
                 "--size-only",
                 "--progress",
-                "-drive-copy-shortcut-content",
+                "--drive-copy-shortcut-content",
                 "--include-from",
                 include_file,
                 f'"{source_path}"',  # Source is current directory, as include file contains paths
