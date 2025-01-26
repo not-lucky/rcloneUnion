@@ -185,3 +185,5 @@ x.txt
 credentials.json
 token.json
 backups/
+*.pickle
+aa/

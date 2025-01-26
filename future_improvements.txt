@@ -1,0 +1,10 @@
+include files
+remove folder/files
+backups of different kinds: database, commands, include files (zip), etc
+handle recursive folders
+create config file for every transfer
+regex for uplaod, delete and print structure
+manager recursive shortcuts (probably check levels for each file, get their id and if same id matched compare levels, use shortest level files)
+
+for deleting, using delete command and include files will delete files but not directory. to delete directory i have to use rclone purge, and for that i have to know who created the folder. Hopefully i can use drive api for that. lets see. 
+when uploading a single, no need to use include file (works as expected so not priority)

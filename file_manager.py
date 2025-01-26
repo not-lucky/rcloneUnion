@@ -44,7 +44,9 @@ class FileManager:
                         "filename": file,
                         "relative_file_path": relative_file_path,
                         "size": file_size,
-                        "destination_path": destination_path,
+                        "destination_path": os.path.join(
+                            destination_base_path, os.path.basename(source_dir)
+                        ),
                         "destination_path_with_name": destination_path_with_name,
                         # "full_file_path": file_path,
                     }
